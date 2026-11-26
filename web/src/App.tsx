@@ -2,13 +2,25 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl, { Map as MlMap, StyleSpecification } from "maplibre-gl";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { PointCloudLayer } from "@deck.gl/layers";
+import { Tile3DLayer } from "@deck.gl/geo-layers";
 import { COORDINATE_SYSTEM } from "@deck.gl/core";
+import type { Matrix4Like } from "@math.gl/core";
+import { Tiles3DLoader } from "@loaders.gl/3d-tiles";
+import { Protocol as PmtilesProtocol } from "pmtiles";
+import { cogProtocol } from "@geomatico/maplibre-cog-protocol";
 import {
   CLASS_COLORS, CLASS_NAMES, ColorMode, Meta, PointData, QaSummary,
   loadMeta, loadPoints, loadQa, pointColors, presentClasses,
 } from "./data";
 
-type LayerKey = "points" | "dtm" | "dsm" | "ndsm" | "density" | "gaps" | "aoi";
+type LayerKey = "points" | "dtm" | "dsm" | "ndsm" | "density" | "contours" | "gaps" | "aoi";
+type PointSource = "tiles3d" | "binary";
+
+// Raster layers stream from Cloud Optimized GeoTIFFs and vector layers from a PMTiles archive,
+// both read with HTTP range requests, so the site needs no tile server.
+maplibregl.addProtocol("cog", cogProtocol);
+maplibregl.addProtocol("pmtiles", new PmtilesProtocol().tile);
+const abs = (path: string) => new URL(path, window.location.href).href;
 
 const RASTERS = ["dtm", "dsm", "ndsm", "density"] as const;
 const RASTER_OPACITY: Record<string, number> = { dtm: 0.95, dsm: 0.85, ndsm: 0.9, density: 0.85 };
@@ -36,6 +48,7 @@ const LAYER_LABELS: Record<LayerKey, string> = {
   dsm: "Surface (DSM) hillshade",
   ndsm: "Height above ground",
   density: "Point density (QA)",
+  contours: "Contours, 1 m",
   gaps: "Voids and low density (QA)",
   aoi: "Planned survey area",
 };
@@ -49,23 +62,27 @@ export default function App() {
   const [qa, setQa] = useState<QaSummary | null>(null);
   const [points, setPoints] = useState<PointData | null>(null);
   const [mapReady, setMapReady] = useState(false);
+  const [tilesLoaded, setTilesLoaded] = useState(0);
   const [panelOpen, setPanelOpen] = useState(true);
   const [is3d, setIs3d] = useState(true);
   const [colorMode, setColorMode] = useState<ColorMode>("rgb");
   const [pointSize, setPointSize] = useState(2);
   const [zScale, setZScale] = useState(1.5);
+  const [source, setSource] = useState<PointSource>("tiles3d");
   const [visible, setVisible] = useState<Record<LayerKey, boolean>>({
-    points: true, dtm: false, dsm: true, ndsm: false, density: false, gaps: true, aoi: true,
+    points: true, dtm: false, dsm: true, ndsm: false, density: false, contours: true, gaps: true, aoi: true,
   });
 
   // Load data
   useEffect(() => {
-    loadMeta().then((m) => {
-      setMeta(m);
-      loadPoints(m.points.count).then(setPoints);
-    });
+    loadMeta().then(setMeta);
     loadQa().then(setQa);
   }, []);
+
+  // The full binary point cloud is only downloaded if the viewer switches to it
+  useEffect(() => {
+    if (meta && source === "binary" && !points) loadPoints(meta.points.count).then(setPoints);
+  }, [meta, source, points]);
 
   // Create the map once metadata is available
   useEffect(() => {
@@ -94,20 +111,22 @@ export default function App() {
     map.on("load", () => {
       fitData(50, -20, 0);
       for (const key of RASTERS) {
-        const l = meta.layers[key];
-        map.addSource(key, { type: "image", url: `data/${key}.png`, coordinates: l.corners });
+        map.addSource(key, { type: "raster", url: `cog://${abs(`data/${meta.layers[key].cog}`)}`, tileSize: 256 });
         map.addLayer({ id: key, type: "raster", source: key, paint: { "raster-opacity": RASTER_OPACITY[key], "raster-resampling": "nearest" } });
       }
-      map.addSource("gaps", { type: "geojson", data: "data/gaps.geojson" });
+      map.addSource("qa", { type: "vector", url: `pmtiles://${abs("data/qa.pmtiles")}` });
       map.addLayer({
-        id: "gaps", type: "fill", source: "gaps",
+        id: "contours", type: "line", source: "qa", "source-layer": "contours",
+        paint: { "line-color": "#6b4f2a", "line-opacity": 0.8, "line-width": ["case", ["get", "major"], 1.8, 0.8] },
+      });
+      map.addLayer({
+        id: "gaps", type: "fill", source: "qa", "source-layer": "gaps",
         paint: {
           "fill-color": ["match", ["get", "type"], "void", "#3b3b3b", "#e4572e"],
           "fill-opacity": 0.75, "fill-outline-color": "#ffffff",
         },
       });
-      map.addSource("aoi", { type: "geojson", data: "data/aoi.geojson" });
-      map.addLayer({ id: "aoi", type: "line", source: "aoi", paint: { "line-color": "#00b4d8", "line-width": 2.5, "line-dasharray": [2, 1] } });
+      map.addLayer({ id: "aoi", type: "line", source: "qa", "source-layer": "aoi", paint: { "line-color": "#00b4d8", "line-width": 2.5, "line-dasharray": [2, 1] } });
 
       const overlay = new MapboxOverlay({ interleaved: false, layers: [] });
       map.addControl(overlay);
@@ -122,7 +141,7 @@ export default function App() {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
-    for (const key of [...RASTERS, "gaps", "aoi"] as LayerKey[]) {
+    for (const key of [...RASTERS, "contours", "gaps", "aoi"] as LayerKey[]) {
       map.setLayoutProperty(key, "visibility", visible[key] ? "visible" : "none");
     }
   }, [visible, mapReady]);
@@ -138,12 +157,23 @@ export default function App() {
   const colors = useMemo(() => (points ? pointColors(points, colorMode) : null), [points, colorMode]);
   useEffect(() => {
     const overlay = overlayRef.current;
-    if (!overlay || !meta || !points || !colors) return;
+    if (!overlay || !meta) return;
+    const zMatrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, is3d ? zScale : 0.0001, 0, 0, 0, 0, 1] as unknown as Matrix4Like;
     overlay.setProps({
       layers: [
-        new PointCloudLayer({
+        // Streamed: OGC 3D Tiles, loaded tile by tile at the level of detail the view needs
+        new Tile3DLayer({
+          id: "tiles3d",
+          visible: visible.points && source === "tiles3d",
+          data: abs(`data/${meta.points.tileset}`),
+          loader: Tiles3DLoader,
+          pointSize,
+          onTileLoad: () => setTilesLoaded((n) => n + 1),
+        }),
+        // Full: every point at once from compact binary arrays, recoloured on the GPU
+        points && colors && new PointCloudLayer({
           id: "points",
-          visible: visible.points,
+          visible: visible.points && source === "binary",
           data: {
             length: points.count,
             attributes: {
@@ -153,7 +183,7 @@ export default function App() {
           },
           coordinateSystem: COORDINATE_SYSTEM.METER_OFFSETS,
           coordinateOrigin: [meta.points.origin[0], meta.points.origin[1], 0],
-          modelMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, is3d ? zScale : 0.0001, 0, 0, 0, 0, 1],
+          modelMatrix: zMatrix,
           pointSize,
           sizeUnits: "pixels",
           material: false,
@@ -161,7 +191,7 @@ export default function App() {
         }),
       ],
     });
-  }, [meta, points, colors, visible.points, pointSize, zScale, is3d, colorMode, mapReady]);
+  }, [meta, points, colors, visible.points, pointSize, zScale, is3d, colorMode, mapReady, source]);
 
   const classes = useMemo(() => (points ? presentClasses(points) : []), [points]);
   const toggle = (k: LayerKey) => setVisible((v) => ({ ...v, [k]: !v[k] }));
@@ -209,6 +239,15 @@ export default function App() {
         <section>
           <h2>Point cloud</h2>
           <div className="seg">
+            <button className={source === "tiles3d" ? "on" : ""} onClick={() => setSource("tiles3d")}>3D Tiles (streamed)</button>
+            <button className={source === "binary" ? "on" : ""} onClick={() => setSource("binary")}>All points</button>
+          </div>
+          <p className="note">
+            {source === "tiles3d"
+              ? `OGC 3D Tiles: the browser loads only the tiles and level of detail the view needs (${tilesLoaded} tiles loaded so far).`
+              : "Every point at once from compact binary arrays, recoloured on the GPU."}
+          </p>
+          <div className="seg" style={{ opacity: source === "binary" ? 1 : 0.45, pointerEvents: source === "binary" ? "auto" : "none" }}>
             {(["rgb", "elevation", "class"] as ColorMode[]).map((m) => (
               <button key={m} className={colorMode === m ? "on" : ""} onClick={() => setColorMode(m)}>
                 {m === "rgb" ? "Colour" : m === "elevation" ? "Elevation" : "Class"}
@@ -228,10 +267,12 @@ export default function App() {
           <label className="slider">Point size {pointSize}px
             <input type="range" min={1} max={5} step={1} value={pointSize} onChange={(e) => setPointSize(+e.target.value)} />
           </label>
-          <label className="slider">Vertical scale {zScale.toFixed(1)}x
-            <input type="range" min={1} max={4} step={0.5} value={zScale} onChange={(e) => setZScale(+e.target.value)} disabled={!is3d} />
-          </label>
-          {points && <p className="note">{points.count.toLocaleString()} points</p>}
+          {source === "binary" && (
+            <label className="slider">Vertical scale {zScale.toFixed(1)}x
+              <input type="range" min={1} max={4} step={0.5} value={zScale} onChange={(e) => setZScale(+e.target.value)} disabled={!is3d} />
+            </label>
+          )}
+          {meta && <p className="note">{meta.points.count.toLocaleString()} points</p>}
         </section>
 
         {qa && (
@@ -256,11 +297,22 @@ export default function App() {
         )}
 
         <section>
+          <h2>How the data is served</h2>
+          <ul className="downloads">
+            <li><b>Rasters:</b> Cloud Optimized GeoTIFFs on the Web Mercator tile grid, streamed by HTTP range request</li>
+            <li><b>Contours and QA:</b> vector tiles in one PMTiles archive{meta ? ` (${meta.vector_tiles.contours} contour lines)` : ""}</li>
+            <li><b>Point cloud:</b> OGC 3D Tiles, or binary arrays for full detail</li>
+          </ul>
+          <p className="note">All static files on GitHub Pages: no tile server or database.</p>
+        </section>
+
+        <section>
           <h2>Downloads</h2>
           <ul className="downloads">
             <li><a href="data/dtm_cog.tif" download>Bare earth DTM, Cloud Optimized GeoTIFF</a></li>
             <li><a href="data/dsm_cog.tif" download>Surface DSM, Cloud Optimized GeoTIFF</a></li>
             <li><a href="data/gaps.geojson" download>Void and low density polygons, GeoJSON</a></li>
+            <li><a href="data/qa.pmtiles" download>Contours and QA layers, PMTiles vector tiles</a></li>
           </ul>
           {meta && <p className="note">Rasters: {meta.source.cell_m} m cells in {meta.source.raster_crs}.</p>}
         </section>

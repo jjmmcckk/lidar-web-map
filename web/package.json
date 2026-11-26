@@ -10,9 +10,14 @@
   },
   "dependencies": {
     "@deck.gl/core": "^9.4.2",
+    "@deck.gl/geo-layers": "^9.4.2",
     "@deck.gl/layers": "^9.4.2",
     "@deck.gl/mapbox": "^9.4.2",
+    "@geomatico/maplibre-cog-protocol": "^0.10.0",
+    "@loaders.gl/3d-tiles": "^4.5.5",
+    "@loaders.gl/core": "^4.5.5",
     "maplibre-gl": "^5.24.1",
+    "pmtiles": "^4.5.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

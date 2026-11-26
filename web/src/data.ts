@@ -5,12 +5,14 @@ export type Corners = [[number, number], [number, number], [number, number], [nu
 export interface RasterLayerMeta {
   title: string;
   legend: string;
+  cog: string;
   corners: Corners;
 }
 
 export interface Meta {
-  points: { count: number; origin: [number, number]; z_min_m: number; z_max_m: number };
+  points: { count: number; origin: [number, number]; z_min_m: number; z_max_m: number; tileset: string };
   layers: Record<string, RasterLayerMeta>;
+  vector_tiles: { file: string; layers: string[]; contour_interval_m: number; contours: number };
   source: { file: string; crs: string; raster_crs: string; cell_m: number };
 }
 

@@ -1,10 +1,12 @@
 """Turn a LAS/LAZ point cloud into web map layers.
 
 Outputs (written to web/public/data/):
-  points_pos.bin, points_rgb.bin, points_cls.bin  point cloud for deck.gl (metre offsets, colours, classes)
-  dtm.png, dsm.png, ndsm.png, density.png         raster overlays in Web Mercator, with corner coordinates
-  dtm_cog.tif, dsm_cog.tif                        Cloud Optimized GeoTIFFs (UTM, metres) for download
-  gaps.geojson, aoi.geojson, qa_summary.json      QA results from lidar-qa-toolkit
+  tiles3d/                                        point cloud as OGC 3D Tiles, streamed by level of detail
+  points_pos.bin, points_rgb.bin, points_cls.bin  full point cloud for deck.gl (metre offsets, colours, classes)
+  dtm.tif, dsm.tif, ndsm.tif, density.tif         rendered layers as Web Mercator COGs, streamed by HTTP range requests
+  qa.pmtiles                                      vector tiles: contours, QA voids and the planned survey area
+  dtm_cog.tif, dsm_cog.tif                        analysis grade COGs (UTM, metres, float32) for download
+  gaps.geojson, qa_summary.json                   QA results from lidar-qa-toolkit
   meta.json                                       layer metadata read by the web app
 
 Usage:
@@ -22,8 +24,11 @@ import laspy
 import matplotlib
 import numpy as np
 import pyproj
+import subprocess
+
 import rasterio
 import rasterio.shutil
+from rasterio.enums import ColorInterp
 from matplotlib import colormaps
 from PIL import Image
 from rasterio.transform import from_origin
@@ -140,6 +145,90 @@ def rgba_to_mercator_png(rgba, transform, crs, name):
     return [[round(a, 7), round(b, 7)] for a, b in corners]
 
 
+def write_view_cog(rgba, transform, crs, name):
+    """Save a rendered RGBA layer as a Web Mercator COG on the Google Maps tile grid (256 px blocks,
+    overviews), so the browser can stream just the tiles in view with HTTP range requests."""
+    h, w = rgba.shape[:2]
+    out = os.path.join(OUT, f"{name}.tif")
+    with tempfile.TemporaryDirectory() as tmp:
+        src_path = os.path.join(tmp, "src.tif")
+        with rasterio.open(src_path, "w", driver="GTiff", width=w, height=h, count=4, dtype="uint8",
+                           crs=crs.to_wkt(), transform=transform) as dst:
+            for b in range(4):
+                dst.write(rgba[:, :, b], b + 1)
+            dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
+        with rasterio.open(src_path) as src:
+            rasterio.shutil.copy(src, out, driver="COG", TILING_SCHEME="GoogleMapsCompatible", BLOCKSIZE=256,
+                                 COMPRESS="DEFLATE", RESAMPLING="NEAREST", OVERVIEWS="IGNORE_EXISTING")
+    with rasterio.open(out) as c:
+        b = c.bounds
+    to_ll = pyproj.Transformer.from_crs(3857, 4326, always_xy=True)
+    corners = [to_ll.transform(x, y) for x, y in [(b.left, b.top), (b.right, b.top), (b.right, b.bottom), (b.left, b.bottom)]]
+    return [[round(x, 7), round(y, 7)] for x, y in corners]
+
+
+def write_3dtiles(p, utm):
+    """Point cloud as OGC 3D Tiles (pnts) with py3dtiles: heights relative to the lowest point, as in
+    the binary layer, so both sit on the basemap."""
+    zmin = float(p["z"].min())
+    with tempfile.TemporaryDirectory() as tmp:
+        las_path = os.path.join(tmp, "cloud.las")
+        header = laspy.LasHeader(point_format=3, version="1.2")
+        header.scales = [0.001, 0.001, 0.001]
+        header.offsets = [float(p["e"].min()), float(p["n"].min()), 0.0]
+        header.add_crs(utm)
+        las = laspy.LasData(header)
+        las.x, las.y, las.z = p["e"], p["n"], p["z"] - zmin
+        las.red, las.green, las.blue = (p["rgb"][:, i].astype(np.uint16) * 256 for i in range(3))
+        las.classification = p["cls"]
+        las.write(las_path)
+        out = os.path.join(OUT, "tiles3d")
+        subprocess.run(["py3dtiles", "convert", las_path, "--out", out, "--overwrite", "--jobs", "2",
+                        "--srs_in", str(utm.to_epsg()), "--srs_out", "4978"], check=True, capture_output=True)
+    return "tiles3d/tileset.json"
+
+
+def write_contours(dtm, transform, utm, interval=1.0, path=None):
+    """Contour lines from the bare earth model, as GeoJSON in WGS 84."""
+    from skimage import measure
+    valid = ~np.isnan(dtm)
+    z = np.where(valid, dtm, np.nanmin(dtm))
+    to_ll = pyproj.Transformer.from_crs(utm, 4326, always_xy=True)
+    feats = []
+    for level in np.arange(np.ceil(np.nanmin(dtm) / interval) * interval, np.nanmax(dtm), interval):
+        for c in measure.find_contours(z, level, mask=valid):
+            if len(c) < 4:
+                continue
+            x = transform.c + (c[:, 1] + 0.5) * transform.a
+            y = transform.f + (c[:, 0] + 0.5) * transform.e
+            lon, lat = to_ll.transform(x, y)
+            feats.append({"type": "Feature", "properties": {"elev_m": round(float(level), 1),
+                                                            "major": bool(round(level) % 5 == 0)},
+                          "geometry": {"type": "LineString",
+                                       "coordinates": [[round(a, 7), round(b, 7)] for a, b in zip(lon, lat)]}})
+    with open(path, "w") as f:
+        json.dump({"type": "FeatureCollection", "features": feats}, f)
+    return len(feats)
+
+
+def write_vector_tiles(layers: dict[str, str]):
+    """Pack GeoJSON layers into one PMTiles archive of vector tiles with tippecanoe (zooms 12 to 19)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, path in layers.items():
+            shutil.copy(path, os.path.join(tmp, f"{name}.geojson"))
+        args = ["tippecanoe", "-o", "qa.pmtiles", "--force", "-Z", "12", "-z", "19", "-n", "LiDAR QA layers",
+                "-N", "Contours, voids and low density areas, planned survey area",
+                "--no-tile-size-limit", "--no-feature-limit", "--quiet"]
+        for name in layers:
+            args += ["-L", f"{name}:{name}.geojson"]
+        env = {**os.environ, "PATH": os.path.dirname(TIPPECANOE) + os.pathsep + os.environ["PATH"]} if os.sep in TIPPECANOE else None
+        subprocess.run(args, check=True, cwd=tmp, env=env)
+        shutil.copy(os.path.join(tmp, "qa.pmtiles"), os.path.join(OUT, "qa.pmtiles"))
+
+
+TIPPECANOE = os.environ.get("TIPPECANOE", "tippecanoe")
+
+
 def colorize(values, cmap, vmin, vmax, shade=None, alpha_mask=None):
     norm = np.clip((values - vmin) / max(vmax - vmin, 1e-9), 0, 1)
     rgba = (colormaps[cmap](np.nan_to_num(norm)) * 255).astype(np.uint8)
@@ -164,6 +253,7 @@ def main():
     utm = pyproj.CRS.from_user_input(a.utm)
     p = load_points(a.las, utm)
     meta = {"points": write_points(p, utm), "layers": {}}
+    meta["points"]["tileset"] = write_3dtiles(p, utm)
 
     pad = 2 * a.cell
     bounds = (p["e"].min() - pad, p["n"].min() - pad, p["e"].max() + pad, p["n"].max() + pad)
@@ -189,8 +279,8 @@ def main():
                  "Height above ground", f"1 to {np.nanpercentile(ndsm, 99):.0f} m"),
     }
     for key, (rgba, title, legend) in layers.items():
-        meta["layers"][key] = {"title": title, "legend": legend,
-                               "corners": rgba_to_mercator_png(rgba, t, utm, key)}
+        meta["layers"][key] = {"title": title, "legend": legend, "cog": f"{key}.tif",
+                               "corners": write_view_cog(rgba, t, utm, key)}
 
     # QA layers from lidar-qa-toolkit, run on the original file
     qa = analyse(a.las, cell_m=2.0, aoi_path=a.aoi)
@@ -205,10 +295,19 @@ def main():
     dens_rgba[low] = [228, 87, 46, 255]
     meta["layers"]["density"] = {"title": "Point density (QA)",
                                  "legend": f"0 to {a.min_density * 2:g} pts/m², red below {a.min_density:g}",
-                                 "corners": rgba_to_mercator_png(dens_rgba, qa.grid.transform, qa.crs, "density")}
-    if a.aoi:
-        import geopandas as gpd
-        gpd.read_file(a.aoi).to_crs(4326).to_file(os.path.join(OUT, "aoi.geojson"), driver="GeoJSON")
+                                 "cog": "density.tif",
+                                 "corners": write_view_cog(dens_rgba, qa.grid.transform, qa.crs, "density")}
+
+    # Vector tiles: contours, QA voids and low density areas, and the planned survey area
+    with tempfile.TemporaryDirectory() as tmp:
+        vt = {"contours": os.path.join(tmp, "contours.geojson"), "gaps": os.path.join(OUT, "gaps.geojson")}
+        n = write_contours(dtm, t, utm, 1.0, vt["contours"])
+        if a.aoi:
+            import geopandas as gpd
+            vt["aoi"] = os.path.join(tmp, "aoi.geojson")
+            gpd.read_file(a.aoi).to_crs(4326).to_file(vt["aoi"], driver="GeoJSON")
+        write_vector_tiles(vt)
+    meta["vector_tiles"] = {"file": "qa.pmtiles", "layers": list(vt), "contour_interval_m": 1.0, "contours": n}
     with open(os.path.join(OUT, "qa_summary.json"), "w") as f:
         json.dump({"checks": summary["checks"], "density": summary["density_stats_pts_per_m2"],
                    "min_density": a.min_density, "gaps": summary["gaps"]}, f, indent=1, default=str)

@@ -2,55 +2,65 @@
 
 **Live demo: https://jjmmcckk.github.io/lidar-web-map/**
 
-An interactive web map built from one LiDAR file: the 3D point cloud, bare earth and surface
-models, height above ground, and QA results (point density, voids and low density areas
-against a planned survey area), with the rasters available as Cloud Optimized GeoTIFFs.
+One LiDAR file turned into decision ready web layers: the point cloud as streamed 3D Tiles,
+bare earth and surface models as Cloud Optimized GeoTIFFs, and contours and QA results as
+vector tiles. Everything is static files on GitHub Pages, with no tile server or database.
 
-![3D point cloud with QA layers](images/screenshot_3d.png)
+![3D Tiles point cloud with QA layers](images/screenshot_3d.png)
 
-## What it shows
+## Process
 
-| Layer | Made from |
-|---|---|
-| LiDAR point cloud (110,000 points) | Shown in 3D in true colour, by elevation, or by ASPRS class, with adjustable point size and vertical scale |
-| Bare earth (DTM) hillshade | Ground points (class 2) gridded at 1 m, gaps interpolated, coloured by elevation |
-| Surface (DSM) hillshade | Highest point per 1 m cell: buildings, trees and ground |
-| Height above ground | DSM minus DTM, shown from 1 m up |
-| Point density, voids and low density | From [lidar-qa-toolkit](https://github.com/jjmmcckk/lidar-qa-toolkit), checked against a 2 pts/m² target |
-| Planned survey area | The AOI the QA checks coverage against |
+1. **Choose and credit the data.** An openly licensed LiDAR sample (Autzen, from the PDAL
+   project's test data), chosen because it has the problems real deliveries have: coordinates
+   in feet, a mix of classified and unclassified points, and gaps against a planned survey area.
+2. **Fix the coordinates first.** Reproject from Oregon Lambert (feet) to UTM zone 10N
+   (metres) and convert heights to metres, so every later measurement is in real units.
+3. **Build the surfaces.** Grid the highest point per 1 m cell for the surface model (DSM) and
+   the mean of ground points for the bare earth model (DTM), fill small gaps by interpolation,
+   then derive hillshades, height above ground and 1 m contours.
+4. **Check quality before publishing.** Run
+   [lidar-qa-toolkit](https://github.com/jjmmcckk/lidar-qa-toolkit) for point density, voids and
+   coverage of the planned area, and show the results on the map instead of hiding them.
+5. **Package each layer in the format built to stream it:**
 
-The side panel lists every QA check with pass or fail, and links the DTM and DSM as Cloud
-Optimized GeoTIFFs plus the void polygons as GeoJSON.
+   | Layer | Format | How the browser gets it |
+   |---|---|---|
+   | Point cloud | OGC 3D Tiles (py3dtiles) | Only the tiles and level of detail the view needs |
+   | DTM, DSM, height above ground, density | Cloud Optimized GeoTIFF on the Web Mercator tile grid, 256 px blocks with overviews | HTTP range requests for the tiles in view |
+   | Contours, voids, planned survey area | Vector tiles in one PMTiles archive (tippecanoe) | HTTP range requests for the tiles in view |
+   | Full point cloud (optional) | Float32 metre offsets from a local origin | One download, recoloured on the GPU |
 
-![2D view with bare earth and classification](images/screenshot_2d.png)
+6. **Deliver analysis grade files too.** The DTM and DSM are also published as float32 COGs in
+   UTM for GIS use, and the voids as GeoJSON.
 
-## How it works
+![2D view: streamed DTM, contours and QA layers](images/screenshot_2d.png)
 
-**Data preparation** ([prep/prepare_data.py](prep/prepare_data.py)), in Python with laspy,
-pyproj, SciPy and rasterio:
+## Why these formats
 
-- Reprojects the points from Oregon Lambert (feet) to UTM zone 10N (metres) and converts
-  heights from feet to metres.
-- Builds the DSM (highest point per cell) and DTM (mean of ground points per cell, gaps
-  filled by interpolation and lightly smoothed), then hillshades and height above ground.
-- Writes the DTM and DSM as Cloud Optimized GeoTIFFs, and reprojects colour rendered
-  versions to Web Mercator PNG overlays with their corner coordinates.
-- Packs the points into compact binary files as float32 metre offsets from a local origin,
-  which keeps centimetre precision in the browser (plain longitude and latitude in float32
-  would lose about half a metre).
-- Runs lidar-qa-toolkit for the density grid, void and low density polygons, and checks.
+- **3D Tiles** keep a large point cloud usable in a browser: a coarse preview loads first,
+  then detail fills in only where the viewer zooms.
+- **COGs** let one file serve as both the download and the map layer; the browser reads just
+  the bytes for the tiles on screen.
+- **PMTiles** packs every zoom level of the vector layers into one file that any static host
+  can serve.
+- **Metre offsets** for the full cloud keep centimetre precision; plain longitude and latitude
+  stored as float32 would lose about half a metre.
 
-**Web app** ([web/](web/)), in React and TypeScript with MapLibre GL JS and deck.gl:
+## Web app
 
-- deck.gl's PointCloudLayer draws the binary point attributes directly on the GPU, so the
-  whole cloud loads without parsing a large JSON file.
-- MapLibre draws the raster overlays, GeoJSON QA layers and the OpenStreetMap basemap.
-- Vite builds the site into [docs/](docs/), which GitHub Pages serves.
+React and TypeScript, built with Vite into [docs/](docs/) for GitHub Pages:
+
+- MapLibre GL JS for the basemap, the COG rasters (through the
+  [MapLibre COG Protocol](https://github.com/geomatico/maplibre-cog-protocol)) and the PMTiles
+  vector layers.
+- deck.gl's Tile3DLayer for the 3D Tiles point cloud, and PointCloudLayer for the full cloud
+  coloured by RGB, elevation or ASPRS class.
+- A side panel with layer controls, QA results and downloads.
 
 ## Run it yourself
 
 ```bash
-# 1. Prepare the data
+# 1. Prepare the data (needs tippecanoe on the PATH, or set TIPPECANOE to its location)
 pip install -r prep/requirements.txt
 bash prep/get_sample_data.sh
 python prep/prepare_data.py data/autzen_trim.las --aoi data/autzen_aoi.geojson
@@ -63,8 +73,8 @@ npm run build      # writes the site to ../docs
 ```
 
 To use another survey, point `prepare_data.py` at your LAS/LAZ file and pass a projected
-coordinate system in metres for the rasters with `--utm` (for example `EPSG:2958` for
-NAD83(CSRS) UTM zone 17N in southern Ontario).
+coordinate system in metres with `--utm` (for example `EPSG:2958` for NAD83(CSRS) UTM zone 17N
+in southern Ontario).
 
 ## Data credits
 
