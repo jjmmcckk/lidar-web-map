@@ -82,6 +82,12 @@ in southern Ontario).
   [PDAL project's test data](https://github.com/PDAL/PDAL/tree/master/test/data/las).
 - **Basemap:** © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors.
 
+## Related
+
+- [lidar-qa-toolkit](https://github.com/jjmmcckk/lidar-qa-toolkit): the QA checks shown on this map.
+- [multispectral-pipeline](https://github.com/jjmmcckk/multispectral-pipeline): vegetation and water
+  indices, change and zones from multispectral imagery, written as COGs.
+
 ## Author
 
 Jordan McKenzie, Transport Canada Advanced RPAS Pilot and Flight Reviewer, B.Sc. Computer
