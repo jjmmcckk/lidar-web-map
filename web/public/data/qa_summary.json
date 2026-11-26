@@ -1,0 +1,83 @@
+{
+ "checks": [
+  {
+   "check": "Coordinate system defined",
+   "value": "NAD_1983_HARN_Lambert_Conformal_Conic",
+   "target": "present",
+   "pass": true
+  },
+  {
+   "check": "Cells meeting 2 pts/m\u00b2 (first returns)",
+   "value": "92.7%",
+   "target": "\u2265 95%",
+   "pass": false
+  },
+  {
+   "check": "Analysis area with any data",
+   "value": "94.9%",
+   "target": "100%",
+   "pass": false
+  },
+  {
+   "check": "Void and low density areas",
+   "value": "1,344 m\u00b2 in 8 polygons",
+   "target": "reported",
+   "pass": null
+  },
+  {
+   "check": "Classified (any class \u2265 2)",
+   "value": "yes",
+   "target": "yes",
+   "pass": true
+  },
+  {
+   "check": "Noise points (classes 7 and 18)",
+   "value": "0.00%",
+   "target": "\u2264 1%",
+   "pass": true
+  }
+ ],
+ "density": {
+  "mean": 2.86,
+  "median": 3.0,
+  "p5": 0.0,
+  "p95": 4.0,
+  "cells": 5720,
+  "empty_cells": 294
+ },
+ "min_density": 2.0,
+ "gaps": [
+  {
+   "area_m2": 1172.0,
+   "type": "void"
+  },
+  {
+   "area_m2": 44.0,
+   "type": "low density"
+  },
+  {
+   "area_m2": 32.0,
+   "type": "low density"
+  },
+  {
+   "area_m2": 24.0,
+   "type": "low density"
+  },
+  {
+   "area_m2": 24.0,
+   "type": "low density"
+  },
+  {
+   "area_m2": 16.0,
+   "type": "low density"
+  },
+  {
+   "area_m2": 16.0,
+   "type": "low density"
+  },
+  {
+   "area_m2": 16.0,
+   "type": "low density"
+  }
+ ]
+}
